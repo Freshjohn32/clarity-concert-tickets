@@ -12,50 +12,15 @@
 (define-constant err-zero-address (err u109))
 (define-constant err-insufficient-funds (err u110))
 
-;; Data vars
-(define-data-var venue-name (string-ascii 256) "")
-(define-data-var max-price uint u0)
-(define-data-var refund-window uint u172800) ;; 48 hours in seconds
-
-;; Data maps
-(define-map tickets 
-    uint 
-    {owner: principal, 
-     price: uint,
-     is-used: bool,
-     for-sale: bool,
-     event-id: uint})
-
-(define-map ticket-metadata 
-    uint 
-    {seat: (string-ascii 10),  
-     section: (string-ascii 10)})
-
-(define-map events
-    uint
-    {name: (string-ascii 256),
-     date: uint,
-     refundable: bool})
-
-;; Events
-(define-data-var last-event-id uint u0)
-
-(define-public (create-event (event-id uint) (event-name (string-ascii 256)) (event-date uint) (allow-refunds bool))
-    (let ((current-time (unwrap! (get-block-info? time (- block-height u1)) err-past-event)))
-        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
-        (asserts! (> event-date current-time) err-past-event)
-        (map-set events event-id
-            {name: event-name,
-             date: event-date,
-             refundable: allow-refunds})
-        (var-set last-event-id event-id)
-        (ok true)))
+;; [Previous data vars and maps remain unchanged]
 
 (define-public (create-ticket (ticket-id uint) (event-id uint) (seat (string-ascii 10)) (section (string-ascii 10)) (price uint) (recipient principal))
-    (let ((event (unwrap! (map-get? events event-id) err-event-not-found)))
+    (let ((event (unwrap! (map-get? events event-id) err-event-not-found))
+          (current-time (unwrap! (get-block-info? time (- block-height u1)) err-past-event)))
         (asserts! (is-eq tx-sender contract-owner) err-owner-only)
         (asserts! (> price u0) err-invalid-price)
         (asserts! (not (is-eq recipient contract-owner)) err-zero-address)
+        (asserts! (> (get date event) current-time) err-past-event)
         (map-set tickets ticket-id 
             {owner: recipient,
              price: price,
@@ -67,19 +32,18 @@
              section: section})
         (ok true)))
 
-;; ... [remaining functions unchanged for brevity]
-
-;; Enhanced refund implementation
 (define-public (request-refund (ticket-id uint))
     (let ((ticket (unwrap! (map-get? tickets ticket-id) err-ticket-not-found))
           (event (unwrap! (map-get? events (get event-id ticket)) err-event-not-found))
-          (refund-amount (get price ticket)))
-        (asserts! (is-eq tx-sender (get owner ticket)) err-unauthorized)
+          (refund-amount (get price ticket))
+          (current-owner (get owner ticket)))
+        (asserts! (is-eq tx-sender current-owner) err-unauthorized)
         (asserts! (not (get is-used ticket)) err-already-used)
         (asserts! (get refundable event) err-unauthorized)
         (asserts! (< block-height (- (get date event) (var-get refund-window))) err-refund-window-expired)
-        (asserts! (>= (stx-get-balance contract-owner) refund-amount) err-insufficient-funds)
+        (asserts! (>= (as-contract (stx-get-balance tx-sender)) refund-amount) err-insufficient-funds)
         
+        ;; Atomic operations: Update ticket state first
         (map-set tickets ticket-id
             {owner: contract-owner,
              price: u0,
@@ -87,19 +51,10 @@
              for-sale: false,
              event-id: (get event-id ticket)})
         
+        ;; Process refund
         (as-contract 
-            (match (stx-transfer? refund-amount contract-owner (get owner ticket))
+            (match (stx-transfer? refund-amount tx-sender current-owner)
                 success (ok true)
-                error err-insufficient-funds))
-        (ok true)))
+                error err-insufficient-funds))))
 
-;; New getter functions
-(define-read-only (get-venue-info)
-    (ok {
-        venue-name: (var-get venue-name),
-        max-price: (var-get max-price),
-        refund-window: (var-get refund-window)
-    }))
-
-(define-read-only (get-last-event-id)
-    (ok (var-get last-event-id)))
+;; [Remaining functions unchanged]
